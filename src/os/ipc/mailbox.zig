@@ -122,6 +122,7 @@ pub const MessageType = struct {
     pub const CART_TONE_FREQ: u32 = 0x200340A0; // freq_hz (u32)
     pub const CART_TONE_DURATION: u32 = 0x200340A4; // duration in 60ths (u32)
 
+    pub const CART_VOLUME: u8 = 0x29;
     /// Rect is in cart space: x:[0..159], y:[0..127], width:[1..160], height:[1..128]
 
     // Application messages (user-defined range: 0x30000000 - 0xFFFFFFFF)
