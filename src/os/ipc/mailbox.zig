@@ -4,6 +4,7 @@ const std = @import("std");
 const microzig = @import("microzig");
 const hal = microzig.hal;
 const timer = @import("../drivers/timer.zig");
+const cart_api = @import("../cart/api.zig");
 
 const fifo = hal.multicore.fifo;
 
@@ -56,6 +57,9 @@ pub fn tryReceive() ?Message {
 pub fn clear() void {
     while (fifo.read()) |_| {}
 }
+
+/// Data shared between the cart API and the OS
+pub const shared_data: *volatile cart_api.CartIPCData = @ptrFromInt(0x20020004);
 
 /// Message type constants for common operations
 pub const MessageType = struct {
@@ -118,12 +122,7 @@ pub const MessageType = struct {
     pub const CART_TONE_FREQ: u32 = 0x200340A0; // freq_hz (u32)
     pub const CART_TONE_DURATION: u32 = 0x200340A4; // duration in 60ths (u32)
 
-    /// Dirty-rectangle metadata for FRAMEBUFFER_READY_V2 (all u16).
     /// Rect is in cart space: x:[0..159], y:[0..127], width:[1..160], height:[1..128]
-    pub const CART_DIRTY_RECT_X: u32 = 0x200340B0;
-    pub const CART_DIRTY_RECT_Y: u32 = 0x200340B2;
-    pub const CART_DIRTY_RECT_W: u32 = 0x200340B4;
-    pub const CART_DIRTY_RECT_H: u32 = 0x200340B6;
 
     // Application messages (user-defined range: 0x30000000 - 0xFFFFFFFF)
     pub const APP_BASE: Message = 0x30000000;
