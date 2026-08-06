@@ -15,7 +15,6 @@ const pwm = hal.pwm;
 const board = microzig.board;
 const PWM = microzig.chip.peripherals.PWM;
 const DMA = microzig.chip.peripherals.DMA;
-const interrupt = microzig.interrupt;
 
 const std = @import("std");
 
@@ -70,10 +69,7 @@ var sound_type: enum {
 } = .off;
 
 var mix_idx: u32 = 0;
-var mix_ready: u32 = 0;
 var mix_enabled: bool = false;
-var mix_request_time: [2]u64 = .{ 0, 0 };
-var mix_slow: bool = false;
 
 fn encode_sample(val: f32) u32 {
     const val01 = @max(0.0, @min(1.0, val * 0.5 + 0.5));
@@ -140,36 +136,6 @@ fn mix_buffer(buffer: *align(64) [dma_buf_size]u32) bool {
     return true;
 }
 
-const INTS = &DMA.INTS1;
-const INTE = &DMA.INTE1;
-
-pub fn interrupt_DMA_1() callconv(.c) void {
-    const int_bits = INTS.raw;
-    var handled_bits: u32 = 0;
-
-    if (int_bits & 0b010 != 0) {
-        handled_bits |= 0b010;
-        mix_ready |= 0b010;
-        mix_request_time[0] = timer.micros();
-        // Detect slow mixing
-        if (mix_idx != 1) {
-            mix_slow |= mix_enabled;
-        }
-    }
-
-    if (int_bits & 0b100 != 0) {
-        handled_bits |= 0b100;
-        mix_ready |= 0b100;
-        mix_request_time[1] = timer.micros();
-        // Detect slow mixing
-        if (mix_idx != 0) {
-            mix_slow |= mix_enabled;
-        }
-    }
-
-    INTS.write_raw(handled_bits);
-}
-
 // Needs to be aligned for DMA source
 var square_cc_vals: [2]u32 align(8) = undefined;
 const square_wave_sample: AudioSample = .{
@@ -215,8 +181,8 @@ pub fn poll() void {
     // Check if a buffer needs mixing
     if (mix_enabled) {
         const buffer_bit: u32 = @as(u32, 1) << @intCast(mix_idx + 1);
-        if (mix_ready & buffer_bit != 0) {
-            mix_ready &= ~buffer_bit;
+        if (DMA.INTR.raw & buffer_bit != 0) {
+            DMA.INTR.write_raw(buffer_bit);
             const start = timer.micros();
             const more_buffers = mix_buffer(&audio_dma_buf[mix_idx]);
             std.mem.doNotOptimizeAway(&audio_dma_buf[mix_idx]);
@@ -378,9 +344,6 @@ fn setup_audio_sample_DMA(duration_sec: f32, frequency: f32, sample: AudioSample
 
     finish_stop_DMA();
 
-    // Disable DMA interrupts
-    INTE.write_raw(INTE.raw & ~@as(u32, 0b110));
-
     // Configure DMA ch1 to update the duty cycle
     // for pin 9 every time the timing slice wraps,
     // switching between the low part and the high
@@ -444,15 +407,11 @@ fn setup_ping_pong_DMA(duration_sec: f32, sample_freq: f32) !void {
         final_mix_samples = dma_buf_size;
     }
 
-    // Clear and enable DMA interrupts
-    INTS.write_raw(0b110);
-    INTE.write_raw(INTE.raw | 0b110);
-
+    mix_idx = 0;
+    mix_enabled = true;
     // For simplicty, don't handle very short audio spurts here.
     _ = mix_buffer(&audio_dma_buf[0]);
     _ = mix_buffer(&audio_dma_buf[1]);
-    mix_idx = 0;
-    mix_enabled = true;
 
     // Configure DMA ch1 to update the duty cycle
     // for pin 9 every time the timing slice wraps,
@@ -518,7 +477,7 @@ fn finish_stop_DMA() void {
     while (DMA.CHAN_ABORT.raw & 0b110 != 0b110) {
         DMA.CHAN_ABORT.write_raw(0b110);
     }
-    mix_ready = 0;
+    DMA.INTR.write_raw(0b110);
 }
 
 /// Stop PWM output and deassert SPKR_EN.
