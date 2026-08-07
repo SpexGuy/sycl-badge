@@ -77,36 +77,53 @@ const MixState = enum {
 var mix_idx: u32 = 0;
 var mix_state: MixState = .disabled;
 
-fn encode_sample(val: f32) u32 {
-    const val01 = @max(0.0, @min(1.0, val * 0.5 + 0.5));
-    return @as(u32, @intFromFloat(val01 * audio_levels)) << 16;
+inline fn encode_sample(val: f32) u32 {
+    return encode_sample_01(val * 0.5 + 0.5);
+}
+
+inline fn encode_sample_no_clamp(val: f32) u32 {
+    return encode_sample_01_no_clamp(val * 0.5 + 0.5);
+}
+
+inline fn encode_sample_01(val: f32) u32 {
+    const val01 = @max(0.0, @min(1.0, val));
+    return encode_sample_01_no_clamp(val01);
+}
+
+inline fn encode_sample_01_no_clamp(val01: f32) u32 {
+    return encode_sample_final_no_clamp(val01 * audio_levels);
+}
+
+inline fn encode_sample_final_no_clamp(val: f32) u32 {
+    return @as(u32, @intFromFloat(val)) << 16;
 }
 
 var period_per_sample: f32 = 0;
 var phase: f32 = 0;
-fn mix_audio_sawtooth(noalias buf: []u32) void {
-    for (buf, 0..) |*sample, i| {
-        const f: f32 = @floatFromInt(i);
-        const samp_phase = phase + period_per_sample * f;
-        const value = (samp_phase - @trunc(samp_phase)) * 2.0 - 1.0;
-        const vol_adj = value * vol_amplitude;
-        sample.* = encode_sample(vol_adj);
+fn mix_audio_sawtooth(noalias buf: [] align(64) u32) void {
+    const final_amplitude = vol_amplitude * audio_levels;
+    const vol_off = -@mulAdd(f32, vol_amplitude, audio_levels/2, -audio_levels/2);
+    var samp_phase = phase;
+    for (buf) |*sample| {
+        const saw_val = @mulAdd(f32, (samp_phase - @trunc(samp_phase)), final_amplitude, vol_off);
+        samp_phase += period_per_sample;
+        sample.* = encode_sample_final_no_clamp(saw_val);
     }
-    phase += @as(f32, @floatFromInt(buf.len)) * period_per_sample;
-    phase = phase - @trunc(phase);
+    phase = samp_phase - @trunc(samp_phase);
 }
 
-fn mix_audio_triangle(noalias buf: []u32) void {
-    for (buf, 0..) |*sample, i| {
-        const f: f32 = @floatFromInt(i);
-        const samp_phase = phase + period_per_sample * f;
-        const saw_val = (samp_phase - @trunc(samp_phase)) * 2.0 - 1.0;
-        const tri_val = @abs(saw_val) * 2.0 - 1.0;
-        const vol_adj = tri_val * vol_amplitude;
-        sample.* = encode_sample(vol_adj);
+fn mix_audio_triangle(noalias buf: [] align(64) u32) void {
+    const final_amplitude = vol_amplitude * audio_levels;
+    const vol_off = -@mulAdd(f32, vol_amplitude, audio_levels/2, -audio_levels/2);
+    var samp_phase = phase;
+    for (buf) |*sample| {
+        const saw_val = @mulAdd(f32, (samp_phase - @trunc(samp_phase)), 2.0, -1.0);
+        samp_phase += period_per_sample;
+        const tri_val = @abs(saw_val);
+        const vol_adj = @mulAdd(f32, tri_val, final_amplitude, vol_off);
+        sample.* = encode_sample_final_no_clamp(vol_adj);
     }
-    phase += @as(f32, @floatFromInt(buf.len)) * period_per_sample;
-    phase = phase - @trunc(phase);
+    phase = samp_phase - @trunc(samp_phase);
 }
 
 var mixes_remaining: ?u32 = 0;
@@ -120,7 +137,7 @@ fn mix_buffer(buffer: *align(64) [dma_buf_size]u32) bool {
             rem.* = 0;
             break :blk final_mix_samples;
         } else {
-            @memset(buffer, comptime encode_sample(0.0));
+            @memset(buffer, comptime encode_sample_01(0.5));
             return false;
         }
     } else dma_buf_size;
@@ -135,7 +152,7 @@ fn mix_buffer(buffer: *align(64) [dma_buf_size]u32) bool {
     }
 
     if (samples_to_mix < dma_buf_size) {
-        @memset(buffer[samples_to_mix..], comptime encode_sample(0.0));
+        @memset(buffer[samples_to_mix..], comptime encode_sample_01(0.5));
         return false;
     }
 
