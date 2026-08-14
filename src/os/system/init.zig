@@ -15,6 +15,7 @@ const rom = @import("../drivers/rom.zig");
 const loader = @import("../loader/loader.zig");
 const debug_log = @import("../debug_log.zig");
 const rev = @import("../drivers/rev.zig");
+const rtt = @import("../drivers/rtt.zig");
 
 // System imports
 const console = @import("console.zig");
@@ -188,6 +189,9 @@ pub fn init(config: InitConfig) !void {
             multicore.initCore1();
         }
     }
+
+    // 12. Set up RTT
+    rtt.init();
 
     _ = boot_start;
     _ = usb_time;

@@ -11,6 +11,7 @@ const gpio = @import("drivers/gpio.zig");
 const audio = @import("drivers/audio.zig");
 const dma = @import("drivers/dma.zig");
 const rev = @import("drivers/rev.zig");
+const rtt = @import("drivers/rtt.zig");
 const console = @import("system/console.zig");
 const init = @import("system/init.zig");
 const fps_overlay = @import("system/fps_overlay.zig");
@@ -167,6 +168,8 @@ pub fn main() !void {
 
         // Process console input
         console.processInput();
+
+        rtt.write_blocking("asdf\n");
 
         // Check if cart is running - controls both button handling and display updates
         // Check for both .ready and .running states (cart is active from load until stop)
