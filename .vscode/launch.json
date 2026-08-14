@@ -1,0 +1,55 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Pico Debug OS (Cortex-Debug)",
+            //"cwd": "${userHome}/.pico-sdk/openocd/0.12.0+dev/scripts",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/zig-out/firmware/sycl-os-kernel.elf",
+            "request": "launch",
+            "type": "cortex-debug",
+            "servertype": "openocd",
+            "serverpath": "${userHome}/.pico-sdk/openocd/0.12.0+dev/openocd.exe",
+            //"gdbPath": "${command:raspberry-pi-pico.getGDBPath}",
+            "gdbPath": "${userHome}/.pico-sdk/toolchain/15_2_Rel1/bin/arm-none-eabi-gdb.exe",
+            "debuggerArgs": ["-ex", "set debug-file-directory /debug"],
+            "device": "RP2350",
+            "configFiles": [
+                "${userHome}/.pico-sdk/openocd/0.12.0+dev/scripts/interface/cmsis-dap.cfg",
+                "${userHome}/.pico-sdk/openocd/0.12.0+dev/scripts/target/rp2350.cfg"
+            ],
+            "svdFile": "${userHome}/.pico-sdk/sdk/2.3.0/src/rp2350/hardware_regs/RP2350.svd",
+            //"runToEntryPoint": "main",
+            // Fix for no_flash binaries, where monitor reset halt doesn't do what is expected
+            // Also works fine for flash binaries
+            "overrideLaunchCommands": [
+                "monitor reset init",
+                "load \"zig-out/firmware/sycl-os-kernel.elf\""
+            ],
+            "openOCDLaunchCommands": [
+                "adapter speed 5000"
+            ]
+        },
+        {
+            "name": "Pico Debug (Cortex-Debug with external OpenOCD)",
+            "cwd": "${workspaceRoot}",
+            "executable": "${workspaceFolder}/zig-out/firmware/sycl-os-kernel.uf2",
+            "request": "launch",
+            "type": "cortex-debug",
+            "servertype": "external",
+            "gdbTarget": "localhost:3333",
+            //"gdbPath": "${command:raspberry-pi-pico.getGDBPath}",
+            "gdbPath": "${userHome}/.pico-sdk/toolchain/15_2_Rel1/bin/arm-none-eabi-gdb.exe",
+            "debuggerArgs": ["-ex", "set debug-file-directory /debug"],
+            "device": "RP2350",
+            "svdFile": "${userHome}/.pico-sdk/sdk/2.3.0/src/rp2350/hardware_regs/RP2350.svd",
+            "runToEntryPoint": "main",
+            // Fix for no_flash binaries, where monitor reset halt doesn't do what is expected
+            // Also works fine for flash binaries
+            "overrideLaunchCommands": [
+                "monitor reset init",
+                "load \"${workspaceFolder}/zig-out/firmware/sycl-os-kernel.uf2\""
+            ],
+        },
+    ]
+}
