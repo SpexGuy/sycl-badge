@@ -32,7 +32,8 @@ const buzzer_sys_clk_hz: u32 = 125_000_000;
 /// Integer pre-divider applied to the system clock before the PWM counter.
 const buzzer_pwm_clk_div = 1;
 /// Number of possible values in an audio buffer
-const audio_levels = 250;
+const initial_audio_levels = 250;
+var audio_levels: u16 = initial_audio_levels;
 /// Speed of the pwm cycle for controlling volume,
 /// too fast for humans to hear (or for the speaker to even create)
 const audio_pwm_cycle_hz = 500_000;
@@ -41,7 +42,7 @@ const max_sample_rate = 44100;
 
 // Make sure the above values are consistent with the hardware.
 // They are all important so we specify them all instead of calculating any of them
-comptime { std.debug.assert(buzzer_sys_clk_hz == audio_levels * audio_pwm_cycle_hz * buzzer_pwm_clk_div); }
+comptime { std.debug.assert(buzzer_sys_clk_hz == initial_audio_levels * audio_pwm_cycle_hz * buzzer_pwm_clk_div); }
 
 /// PWM slice number for GPIO9 (slice = pin / 2 = 9 / 2 = 4).
 const buzzer_pwm_slice: pwm.Slice = @enumFromInt(4);
@@ -66,6 +67,7 @@ var sound_type: enum {
     triangle,
     sawtooth,
     sample,
+    silent_tone,
 } = .off;
 
 const MixState = enum {
@@ -91,7 +93,7 @@ inline fn encode_sample_01(val: f32) u32 {
 }
 
 inline fn encode_sample_01_no_clamp(val01: f32) u32 {
-    return encode_sample_final_no_clamp(val01 * audio_levels);
+    return encode_sample_final_no_clamp(val01 * @as(f32, @floatFromInt(audio_levels)));
 }
 
 inline fn encode_sample_final_no_clamp(val: f32) u32 {
@@ -101,8 +103,8 @@ inline fn encode_sample_final_no_clamp(val: f32) u32 {
 var period_per_sample: f32 = 0;
 var phase: f32 = 0;
 fn mix_audio_sawtooth(noalias buf: [] align(64) u32) void {
-    const final_amplitude = vol_amplitude * audio_levels;
-    const vol_off = -@mulAdd(f32, vol_amplitude, audio_levels/2, -audio_levels/2);
+    const final_amplitude = vol_amplitude * @as(f32, @floatFromInt(audio_levels));
+    const vol_off = -@mulAdd(f32, vol_amplitude, @as(f32, @floatFromInt(audio_levels))/2, -@as(f32, @floatFromInt(audio_levels))/2);
     var samp_phase = phase;
     for (buf) |*sample| {
         const saw_val = @mulAdd(f32, (samp_phase - @trunc(samp_phase)), final_amplitude, vol_off);
@@ -113,8 +115,8 @@ fn mix_audio_sawtooth(noalias buf: [] align(64) u32) void {
 }
 
 fn mix_audio_triangle(noalias buf: [] align(64) u32) void {
-    const final_amplitude = vol_amplitude * audio_levels;
-    const vol_off = -@mulAdd(f32, vol_amplitude, audio_levels/2, -audio_levels/2);
+    const final_amplitude = vol_amplitude * @as(f32, @floatFromInt(audio_levels));
+    const vol_off = -@mulAdd(f32, vol_amplitude, @as(f32, @floatFromInt(audio_levels))/2, -@as(f32, @floatFromInt(audio_levels))/2);
     var samp_phase = phase;
     for (buf) |*sample| {
         const saw_val = @mulAdd(f32, (samp_phase - @trunc(samp_phase)), 2.0, -1.0);
@@ -137,13 +139,13 @@ fn mix_buffer(buffer: *align(64) [dma_buf_size]u32) bool {
             rem.* = 0;
             break :blk final_mix_samples;
         } else {
-            @memset(buffer, comptime encode_sample_01(0.5));
+            @memset(buffer, encode_sample_01(0.5));
             return false;
         }
     } else dma_buf_size;
 
     switch (sound_type) {
-        .off, .square => {}, // mixer shouldn't be in use
+        .off, .square, .silent_tone => {}, // mixer shouldn't be in use
         .sawtooth => mix_audio_sawtooth(buffer[0..samples_to_mix]),
         .triangle => mix_audio_triangle(buffer[0..samples_to_mix]),
         .sample => {
@@ -152,7 +154,7 @@ fn mix_buffer(buffer: *align(64) [dma_buf_size]u32) bool {
     }
 
     if (samples_to_mix < dma_buf_size) {
-        @memset(buffer[samples_to_mix..], comptime encode_sample_01(0.5));
+        @memset(buffer[samples_to_mix..], encode_sample_01(0.5));
         return false;
     }
 
@@ -174,6 +176,7 @@ pub fn init() void {
     board.buzzer_enable.set_function(.sio);
     board.buzzer_enable.set_direction(.out);
     board.buzzer_enable.put(0);
+    board.led_pin.put(0);
 
     // Audio pin: hand control to the PWM peripheral
     board.buzzer_pwm.set_function(.pwm);
@@ -195,7 +198,9 @@ pub fn set_global_volume(in_vol: f32) void {
         }
 
         if (sound_type != .off) {
-            board.buzzer_enable.put(@intFromBool(global_volume != 0.0));
+            const en = @intFromBool(global_volume != 0.0);
+            board.buzzer_enable.put(en);
+            board.led_pin.put(en);
         }
     }
 }
@@ -254,18 +259,37 @@ fn update_square_wave_levels() void {
 
     // Square wave
     // Use round and floor to allow amplitudes with an odd number of divisions
-    const min_f: f32 = @max(0.0, @min(@round(midpoint - amplitude), audio_levels));
-    const max_f: f32 = @max(0.0, @min(@floor(midpoint + amplitude), audio_levels));
+    const min_f: f32 = @max(0.0, @min(@round(midpoint - amplitude), @as(f32, @floatFromInt(audio_levels))));
+    const max_f: f32 = @max(0.0, @min(@floor(midpoint + amplitude), @as(f32, @floatFromInt(audio_levels))));
     square_cc_vals[0] = @as(u32, @intFromFloat(min_f)) << 16;
     square_cc_vals[1] = @as(u32, @intFromFloat(max_f)) << 16;
+}
+
+var carrier_freq: f32 = audio_pwm_cycle_hz;
+pub fn set_carrier_freq(freq: f32) void {
+    if (freq != carrier_freq) {
+        const cfg = calc_clock_divider(freq) catch return;
+
+        buzzer_pwm_slice.set_clk_div(cfg.clk_div_high, cfg.clk_div_low);
+        buzzer_pwm_slice.set_phase_correct(cfg.phase_correct);
+        buzzer_pwm_slice.set_wrap(cfg.wrap);
+        audio_levels = cfg.wrap;
+        carrier_freq = freq;
+
+        if (sound_type == .square) {
+            update_square_wave_levels();
+        }
+
+        if (sound_type == .silent_tone) {
+            buzzer_pwm_ch.set_level(cfg.wrap / 2);
+        }
+    }
 }
 
 /// Start a continuous tone at `freq_hz`.
 /// Passing 0 is equivalent to calling `stop()`.
 /// The speaker enable pin is asserted automatically.
 pub fn tone(freq_hz: f32, duration_sec: f32, volume: f32, flags: u32) void {
-    board.led_pin.put(0);
-
     if (freq_hz == 0 or volume <= 0 or (duration_sec != -1.0 and duration_sec <= 0.0)) {
         stop();
         return;
@@ -292,6 +316,10 @@ pub fn tone(freq_hz: f32, duration_sec: f32, volume: f32, flags: u32) void {
 
 
     switch (sample_sel) {
+        7 => {
+            sound_type = .silent_tone;
+            buzzer_pwm_ch.set_level(audio_levels);
+        },
         0 => {
             update_square_wave_levels();
             setup_audio_sample_DMA(duration_sec, freq_hz, square_wave_sample) catch {
@@ -345,6 +373,7 @@ pub fn tone(freq_hz: f32, duration_sec: f32, volume: f32, flags: u32) void {
     // set_global_volume() has more handling of this case.
     if (global_volume != 0.0) {
         board.buzzer_enable.put(1);
+        board.led_pin.put(1);
     }
 }
 
@@ -354,7 +383,12 @@ const AudioSample = struct {
     sample_buf: [*]const u32,
 };
 
-fn set_timing_PWM_hz(hz: f32) !void {
+fn calc_clock_divider(hz: f32) !struct {
+    phase_correct: bool,
+    clk_div_high: u8,
+    clk_div_low: u4,
+    wrap: u16,
+} {
     // A piano ranges from 27.5 Hz to 4186 Hz, so for the square wave generator
     // clock we need to support a pretty wide range with reasonable accuracy.
     // The possible source clocks are 8.4 fractional divs of the sys clock,
@@ -385,9 +419,20 @@ fn set_timing_PWM_hz(hz: f32) !void {
     const clk_div_int: u32 = if (clk_div == 256) 0 else @intFromFloat(clk_div);
     const wrap_int: u32 = @intFromFloat(wrap_ticks - 1.0);
 
-    audio_timing_slice.set_phase_correct(use_centered_mode);
-    audio_timing_slice.set_clk_div(@intCast(clk_div_int >> 4), @intCast(clk_div_int & 0xF));
-    audio_timing_slice.set_wrap(@intCast(wrap_int));
+    return .{
+        .phase_correct = use_centered_mode,
+        .clk_div_high = @intCast(clk_div_int >> 4),
+        .clk_div_low = @intCast(clk_div_int & 0xF),
+        .wrap = @intCast(wrap_int),
+    };
+}
+
+fn set_timing_PWM_hz(hz: f32) !void {
+    const config = try calc_clock_divider(hz);
+
+    audio_timing_slice.set_phase_correct(config.phase_correct);
+    audio_timing_slice.set_clk_div(config.clk_div_high, config.clk_div_low);
+    audio_timing_slice.set_wrap(config.wrap);
 }
 
 fn setup_audio_sample_DMA(duration_sec: f32, frequency: f32, sample: AudioSample) !void {
@@ -518,6 +563,7 @@ fn finish_stop_DMA() void {
 /// Stop PWM output and deassert SPKR_EN.
 pub fn stop() void {
     board.buzzer_enable.put(0);
+    board.led_pin.put(0);
     begin_stop_DMA();
     buzzer_pwm_slice.disable();
     audio_timing_slice.disable();

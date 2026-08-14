@@ -122,6 +122,8 @@ pub const MessageType = struct {
     /// Cart writes global volume before sending
     pub const CART_VOLUME: u8 = 0x29;
 
+    pub const CART_AUDIO_CARRIER: u32 = 0x2A;
+
     // Application messages (user-defined range: 0x30000000 - 0xFFFFFFFF)
     pub const APP_BASE: Message = 0x30000000;
 

@@ -139,6 +139,7 @@ pub const CartIPCData = extern struct {
     tone_volume: f32,
     tone_flags: u32,
     global_volume: f32,
+    audio_freq: f32,
 };
 const ipc_data: *volatile CartIPCData = @ptrFromInt(base);
 
@@ -744,6 +745,7 @@ pub const Tone2Options = struct {
         sine, // u^u^u^
         major, // Major chord with frequency as the fundamental
         minor, // Minor chord with frequency as the fundamental
+        silent_tone = 7,
     };
 
     pub const Flags = packed struct(u32) {
@@ -816,6 +818,26 @@ pub inline fn setGlobalVolume(volume: f32) void {
 
         while (SIO_FIFO_ST.* & FIFO_RDY == 0) asm volatile ("nop");
         SIO_FIFO_WR.* = CART_VOLUME;
+        asm volatile ("sev");
+    }
+}
+
+/// Adjust the volume of all audio, 0.0 - 1.0. This is a perceptually
+/// linear scale from about -50dB to 0dB adjustment from the maximum
+/// speaker volume.
+pub inline fn setAudioCarrierFreq(freq: f32) void {
+    if (is_wasm) {
+        // TODO wasm volume
+    } else {
+        const CART_AUDIO_CARRIER: u32 = 0x2A000000;
+        const SIO_FIFO_ST: *volatile u32 = @ptrFromInt(0xD0000050);
+        const SIO_FIFO_WR: *volatile u32 = @ptrFromInt(0xD0000054);
+        const FIFO_RDY: u32 = 1 << 1;
+
+        ipc_data.audio_freq = freq;
+
+        while (SIO_FIFO_ST.* & FIFO_RDY == 0) asm volatile ("nop");
+        SIO_FIFO_WR.* = CART_AUDIO_CARRIER;
         asm volatile ("sev");
     }
 }
