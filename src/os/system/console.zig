@@ -1293,6 +1293,7 @@ fn cmdLoad(iter: *std.mem.TokenIterator(u8, .scalar)) void {
             loader.LoadError.InvalidUF2 => println("Invalid UF2 format\r\n"),
             loader.LoadError.UnsupportedFamily => println("Unsupported chip family (need RP2354B)\r\n"),
             loader.LoadError.AddressMismatch => println("UF2 not linked for cart_xip region (0x101C0000)\r\n"),
+            loader.LoadError.VersionMismatch => println("Cart has unknown version\r\n"),
             loader.LoadError.FlashWriteError => println("Flash write error\r\n"),
             loader.LoadError.ReadError => println("Storage read error\r\n"),
         }
@@ -1346,7 +1347,7 @@ fn cmdCart(iter: *std.mem.TokenIterator(u8, .scalar)) void {
         };
         printf("  State: {s}\r\n", .{state_str});
         if (state == .ready or state == .running) {
-            printf("  Entry point: 0x{x}\r\n", .{loader.getEntryPoint()});
+            printf("  Entry point: {any}\r\n", .{loader.getEntryPoint()});
         }
         printf("  Cart XIP region: 0x{x} - 0x{x} ({d}KB)\r\n", .{
             loader.getCartXipStart(),
@@ -1387,7 +1388,7 @@ fn cmdCart(iter: *std.mem.TokenIterator(u8, .scalar)) void {
         }
         const entry = loader.getEntryPoint();
         if (multicore.executeCart(entry)) {
-            printf("\r\nExecuting cart at 0x{x}...\r\n", .{entry});
+            printf("\r\nExecuting cart at {any}...\r\n", .{entry});
         } else {
             println("\r\nFailed to execute cart\r\n");
         }
@@ -1444,6 +1445,7 @@ fn cmdCart(iter: *std.mem.TokenIterator(u8, .scalar)) void {
                 loader.LoadError.InvalidUF2 => println("Invalid UF2 format\r\n"),
                 loader.LoadError.UnsupportedFamily => println("Unsupported chip family (need RP2354B)\r\n"),
                 loader.LoadError.AddressMismatch => println("UF2 not linked for cart_xip region (0x101C0000)\r\n"),
+                loader.LoadError.VersionMismatch => println("Cart has unknown version\r\n"),
                 loader.LoadError.FlashWriteError => println("Flash write error\r\n"),
                 loader.LoadError.ReadError => println("Storage read error\r\n"),
             }
@@ -1461,7 +1463,7 @@ fn cmdCart(iter: *std.mem.TokenIterator(u8, .scalar)) void {
             // Mark as running from Core 0 side
             // (Core 1 also calls markRunning but this ensures state is set immediately)
             loader.markRunning();
-            printf("Cart running at 0x{x}\r\n\r\n", .{entry_point});
+            printf("Cart running at {any}\r\n\r\n", .{entry_point});
         } else {
             println("Failed to start cart execution\r\n");
         }

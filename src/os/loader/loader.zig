@@ -8,10 +8,14 @@ const rom = @import("../drivers/rom.zig");
 const interrupt = microzig.interrupt;
 const debug_log = @import("../debug_log.zig");
 const terry = @import("../system/terry.zig");
+const cd = @import("../cart/cart_descriptor.zig");
+const mailbox = @import("../ipc/mailbox.zig");
 
 /// Linker symbols for cart_xip region
 extern const __cart_xip_start__: u8;
 extern const __cart_xip_end__: u8;
+extern const __process_ram_start__: u8;
+extern const __process_ram_end__: u8;
 
 /// XIP base address for flash
 const XIP_BASE: u32 = 0x10000000;
@@ -42,6 +46,7 @@ pub const LoadError = error{
     InvalidUF2,
     UnsupportedFamily,
     AddressMismatch,
+    VersionMismatch,
     FlashWriteError,
     ReadError,
 };
@@ -49,8 +54,8 @@ pub const LoadError = error{
 /// Current cart state
 var cart_state: terry.core0.TrackedStateMachine(CartState) = undefined;
 
-/// Loaded cart entry point (Reset_Handler address from vector table)
-var cart_entry_point: u32 = 0;
+/// Loaded cart entry point
+var cart_entry_point: mailbox.MessageType.CartExecute = undefined;
 
 /// Loaded cart info
 var loaded_cart_name: [12]u8 = undefined;
@@ -78,6 +83,14 @@ pub fn getCartXipSize() u32 {
     return getCartXipEnd() - getCartXipStart();
 }
 
+pub fn getCartRamStart() u32 {
+    return @intFromPtr(&__process_ram_start__);
+}
+
+pub fn getCartRamEnd() u32 {
+    return @intFromPtr(&__process_ram_end__);
+}
+
 pub const CartVector = struct {
     addr: u32,
     sp: u32,
@@ -100,8 +113,8 @@ pub fn getCartXipVector() ?CartVector {
 /// (Core 1 will read SP and entry point from this address)
 fn findVectorTableAddr(start_addr: u32, end_addr: u32) ?u32 {
     // RAM range for valid stack pointer
-    const RAM_START: u32 = 0x20000000;
-    const RAM_END: u32 = 0x20080000;
+    const RAM_START: u32 = getCartRamStart();
+    const RAM_END: u32 = getCartRamEnd();
 
     // Cart XIP range for valid entry point
     const xip_start = getCartXipStart();
@@ -142,7 +155,7 @@ pub fn getState() CartState {
 }
 
 /// Get loaded cart entry point
-pub fn getEntryPoint() u32 {
+pub fn getEntryPoint() mailbox.MessageType.CartExecute {
     return cart_entry_point;
 }
 
@@ -166,7 +179,7 @@ pub fn markRunning() void {
 /// Stop the current cart
 pub fn stop() void {
     cart_state.set_state(.none, @src());
-    cart_entry_point = 0;
+    cart_entry_point = undefined;
 }
 
 /// Auto-start cart if only one is present in storage
@@ -212,7 +225,7 @@ pub fn eraseCartRegion() LoadError!void {
 
 /// Load a UF2 cart from FAT12 storage and program it to cart_xip flash
 /// Returns the entry point address on success
-pub fn loadUF2Cart(name: []const u8) LoadError!u32 {
+pub fn loadUF2Cart(name: []const u8) LoadError!mailbox.MessageType.CartExecute {
     // If a cart is already running, stop Core 1 before erasing cart_xip.
     if (cart_state.state == .running) {
         const multicore = @import("../system/multicore.zig");
@@ -236,63 +249,55 @@ pub fn loadUF2Cart(name: []const u8) LoadError!u32 {
     }
 
     // Read and parse UF2 blocks
-    const entry_point = try loadUF2FromStorage(cart_info);
+    const start_info = try loadUF2FromStorage(cart_info);
 
     // Save cart info
     @memcpy(&loaded_cart_name, &cart_info.short_name);
     loaded_cart_size = cart_info.size;
-    cart_entry_point = entry_point;
+    cart_entry_point = start_info;
     cart_state.set_state(.ready, @src());
-    return entry_point;
+    return start_info;
 }
 
 /// Internal function to load UF2 from storage and program to flash
-fn loadUF2FromStorage(cart_info: storage.CartInfo) LoadError!u32 {
+fn loadUF2FromStorage(cart_info: storage.CartInfo) LoadError!mailbox.MessageType.CartExecute {
     const cart_xip_start = getCartXipStart();
     const cart_xip_end = getCartXipEnd();
     const cart_xip_size = getCartXipSize();
+    const cart_ram_start = getCartRamStart();
+    const cart_ram_end = getCartRamEnd();
 
     // Read the entire UF2 file into the cart buffer first
-    const bytes_read = storage.readCart(cart_info, &cart_buffer);
-    if (bytes_read == 0 or bytes_read != cart_info.size) {
-        return LoadError.ReadError;
-    }
-    if (bytes_read % uf2.BLOCK_SIZE != 0) {
+    var file: storage.FileIterator = .init(cart_info.size, cart_info.start_cluster);
+    if (cart_info.size % uf2.BLOCK_SIZE != 0) {
         return LoadError.InvalidUF2;
     }
-
-    // Calculate number of UF2 blocks
-    const num_blocks = bytes_read / uf2.BLOCK_SIZE;
-    if (num_blocks == 0) {
-        return LoadError.InvalidUF2;
-    }
-
-    // Debug: record file/blocks info
-    var _uf2_msg: [128]u8 = undefined;
-    const _uf2_slice = std.fmt.bufPrint(_uf2_msg[0..], "UF2 read: {d} bytes, blocks={d}\r\n", .{ bytes_read, num_blocks }) catch "";
-    if (_uf2_slice.len != 0) debug_log.record(_uf2_slice);
 
     // Erase the cart_xip region
     try eraseCartXipRegion();
     var parser = uf2.Parser{};
-    var block_index: u32 = 0;
 
     // Track which parts of cart_xip we need to write
-    var min_offset: u32 = cart_xip_size;
-    var max_offset: u32 = 0;
+    var min_xip_offset: u32 = cart_xip_size;
+    var min_ram_addr = cart_ram_end;
 
     // Temporary buffer to accumulate binary data before flash write
     // We'll write in 4KB blocks
     var current_erase_block: u32 = 0xFFFFFFFF;
     var buffer_dirty: bool = false;
 
+    var has_xip_blocks: bool = false;
+    var has_ram_blocks: bool = false;
+
     // Process each UF2 block from the buffer
-    while (block_index < num_blocks) {
-        const block_offset = block_index * uf2.BLOCK_SIZE;
-        const block_data = cart_buffer[block_offset..][0..uf2.BLOCK_SIZE];
+    var block_index: u32 = 0;
+    while (file.next()) |block_data| : (block_index += 1) {
+        if (block_data.len != uf2.BLOCK_SIZE) {
+            return LoadError.ReadError;
+        }
 
         // Parse the block
-        const block = parser.parseBlock(block_data) catch {
+        const block = parser.parseBlock(block_data[0..uf2.BLOCK_SIZE]) catch {
             return LoadError.InvalidUF2;
         };
 
@@ -302,76 +307,82 @@ fn loadUF2FromStorage(cart_info: storage.CartInfo) LoadError!u32 {
             if (block.hasFamilyId() and !block.isRP235X()) {
                 return LoadError.UnsupportedFamily;
             }
-
-            // Check block count matches file length
-            if (block.header.num_blocks != num_blocks) {
-                return LoadError.InvalidUF2;
-            }
-
-            // Check base address is within cart_xip
-            if (block.header.target_addr < cart_xip_start or
-                block.header.target_addr >= cart_xip_end)
-            {
-                return LoadError.AddressMismatch;
-            }
         }
 
-        // Calculate offset within cart_xip
-        const target_offset = block.header.target_addr - cart_xip_start;
         const payload = block.getPayload();
         if (payload.len == 0) {
             return LoadError.InvalidUF2;
         }
 
-        // Validate each block address range
-        if (block.header.target_addr < cart_xip_start or
-            block.header.target_addr + @as(u32, @intCast(payload.len)) > cart_xip_end)
+        // Check base address is within cart_xip
+        if (block.header.target_addr >= cart_xip_start and
+            block.header.target_addr + payload.len < cart_xip_end)
+        {
+            if (has_ram_blocks) {
+                // For now, we can't support uf2 files with both ram and flash data in them.
+                // The flash write buffer is mapped into process RAM, so it will overlap
+                // with the ram blocks and potentially clobber loaded cart memory.
+                return LoadError.AddressMismatch;
+            }
+
+            has_xip_blocks = true;
+
+            const target_offset = block.header.target_addr - cart_xip_start;
+            min_xip_offset = @min(min_xip_offset, target_offset);
+
+            // Determine which erase block this belongs to
+            const erase_block_num = target_offset / FLASH_ERASE_BLOCK;
+            const offset_in_block = target_offset % FLASH_ERASE_BLOCK;
+
+            // If switching to a new erase block, flush the old one
+            if (erase_block_num != current_erase_block) {
+                if (buffer_dirty) {
+                    try flushWriteBuffer(current_erase_block, cart_xip_start);
+                }
+                // Initialize new buffer with 0xFF (erased flash state)
+                @memset(&flash_write_buffer, 0xFF);
+                current_erase_block = erase_block_num;
+                buffer_dirty = false;
+            }
+
+            // Copy payload to write buffer
+            const copy_len = @min(payload.len, FLASH_ERASE_BLOCK - offset_in_block);
+            @memcpy(flash_write_buffer[offset_in_block .. offset_in_block + copy_len], payload[0..copy_len]);
+            buffer_dirty = true;
+
+            // Handle payload spanning multiple erase blocks (rare but possible)
+            if (copy_len < payload.len) {
+                // Flush current block
+                try flushWriteBuffer(current_erase_block, cart_xip_start);
+
+                // Move to next block
+                current_erase_block += 1;
+                @memset(&flash_write_buffer, 0xFF);
+
+                // Copy remaining payload
+                const remaining = payload.len - copy_len;
+                @memcpy(flash_write_buffer[0..remaining], payload[copy_len..]);
+                buffer_dirty = true;
+            }
+        }
+        else if (block.header.target_addr >= cart_ram_start and
+                 block.header.target_addr + payload.len <= cart_ram_end)
+        {
+            has_ram_blocks = true;
+
+            min_ram_addr = @min(min_ram_addr, block.header.target_addr);
+
+            const ptr: [*]u8 = @ptrFromInt(block.header.target_addr);
+            @memcpy(ptr, payload);
+        }
+        else
         {
             return LoadError.AddressMismatch;
         }
+    }
 
-        // Track extent
-        if (target_offset < min_offset) min_offset = target_offset;
-        if (target_offset + @as(u32, @intCast(payload.len)) > max_offset) {
-            max_offset = target_offset + @as(u32, @intCast(payload.len));
-        }
-
-        // Determine which erase block this belongs to
-        const erase_block_num = target_offset / FLASH_ERASE_BLOCK;
-        const offset_in_block = target_offset % FLASH_ERASE_BLOCK;
-
-        // If switching to a new erase block, flush the old one
-        if (erase_block_num != current_erase_block) {
-            if (buffer_dirty) {
-                try flushWriteBuffer(current_erase_block, cart_xip_start);
-            }
-            // Initialize new buffer with 0xFF (erased flash state)
-            @memset(&flash_write_buffer, 0xFF);
-            current_erase_block = erase_block_num;
-            buffer_dirty = false;
-        }
-
-        // Copy payload to write buffer
-        const copy_len = @min(payload.len, FLASH_ERASE_BLOCK - offset_in_block);
-        @memcpy(flash_write_buffer[offset_in_block .. offset_in_block + copy_len], payload[0..copy_len]);
-        buffer_dirty = true;
-
-        // Handle payload spanning multiple erase blocks (rare but possible)
-        if (copy_len < payload.len) {
-            // Flush current block
-            try flushWriteBuffer(current_erase_block, cart_xip_start);
-
-            // Move to next block
-            current_erase_block += 1;
-            @memset(&flash_write_buffer, 0xFF);
-
-            // Copy remaining payload
-            const remaining = payload.len - copy_len;
-            @memcpy(flash_write_buffer[0..remaining], payload[copy_len..]);
-            buffer_dirty = true;
-        }
-
-        block_index += 1;
+    if (block_index == 0) {
+        return LoadError.InvalidUF2;
     }
 
     // Flush any remaining data
@@ -379,17 +390,56 @@ fn loadUF2FromStorage(cart_info: storage.CartInfo) LoadError!u32 {
         try flushWriteBuffer(current_erase_block, cart_xip_start);
     }
 
-    // Find the vector table by scanning for valid SP and entry point pattern
-    // Some toolchains add padding before the vector table
-    // Returns the vector table ADDRESS (not entry point) so Core 1 can read both SP and entry
     if (!parser.isComplete()) {
         return LoadError.InvalidUF2;
     }
-    parser.validateAddressRange(cart_xip_start, cart_xip_end) catch {
-        return LoadError.AddressMismatch;
-    };
 
-    const vector_table_addr = findVectorTableAddr(cart_xip_start + min_offset, cart_xip_end) orelse {
+    // Check if it's a ram cart first
+    if (has_ram_blocks) find_cart_descriptor: {
+        const start_addr = std.mem.alignForward(u32, min_ram_addr, @alignOf(u32));
+        const max_dist = uf2.BLOCK_SIZE / @alignOf(u32);
+        const cart_descriptor_range = @as([*]u32, @ptrFromInt(start_addr))[0..max_dist];
+        const cart_descriptor_pos = std.mem.indexOfScalar(u32, cart_descriptor_range, cd.CART_MAGIC) orelse break :find_cart_descriptor;
+
+        const cart_descriptor: [*]u32 = @ptrCast(&cart_descriptor_range[cart_descriptor_pos]);
+        // Verify the version
+        switch (cart_descriptor[1]) {
+            cd.CART_VERSION_V1 => {
+                const descriptor: *cd.CartDescriptorTable_v1 = @ptrCast(cart_descriptor);
+                const bss_start = @intFromPtr(descriptor.bss_start);
+                const bss_end = @intFromPtr(descriptor.bss_end);
+                const entry_point = @intFromPtr(descriptor.entry_point);
+                // Verify the pointers
+                if (bss_start < cart_ram_start or bss_start > cart_ram_end or
+                    bss_end < cart_ram_start or bss_end > cart_ram_end or
+                    bss_start > bss_end or
+                    !(entry_point >= cart_ram_start and entry_point < cart_ram_end or
+                        entry_point >= cart_xip_start and entry_point < cart_xip_end) or
+                        entry_point & 1 == 0) // entry_point must be thumb
+                {
+                    return LoadError.AddressMismatch;
+                }
+
+                // Clear BSS
+                const bss = @as([*]u8, @ptrFromInt(bss_start))[0..bss_end - bss_start];
+                @memset(bss, 0);
+
+                // Flush store pipe
+                asm volatile ("dmb" ::: .{ .memory = true });
+
+                // Return the entry point
+                return .{ .xip = false, .offset = @intCast(@intFromPtr(cart_descriptor) - cart_ram_start) };
+            },
+            else => {
+                return LoadError.VersionMismatch;
+            },
+        }
+    }
+
+    // Find the vector table by scanning for valid SP and entry point pattern
+    // Some toolchains add padding before the vector table
+    // Returns the vector table ADDRESS (not entry point) so Core 1 can read both SP and entry
+    const vector_table_addr = findVectorTableAddr(cart_xip_start + min_xip_offset, cart_xip_end) orelse {
         debug_log.record("findVectorTableAddr: vector not found after programming");
         return LoadError.FlashWriteError;
     };
@@ -414,7 +464,7 @@ fn loadUF2FromStorage(cart_info: storage.CartInfo) LoadError!u32 {
         if (_verify_ok_slice.len != 0) debug_log.record(_verify_ok_slice);
     }
 
-    return vector_table_addr;
+    return .{ .xip = true, .offset = @intCast(vector_table_addr - cart_xip_start) };
 }
 
 /// Erase the entire cart_xip flash region
