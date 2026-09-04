@@ -95,10 +95,19 @@ const micros_per_note: u64 = 500_000; // 0.5 second per note
 var change_time: u64 = 0;
 var last_abs_time: u64 = 0;
 
-var volume: f32 = 1.0;
+const max_pwm_freq: f32 = 1_000_000.0;
+const min_pwm_freq: f32 = 50_000.0;
+
+const log_min = @log(min_pwm_freq);
+const log_max = @log(max_pwm_freq);
+
+var volume: f32 = 0.5;
+var lin_freq: f32 = (@log(300_000.0) - log_min) / (log_max - log_min);
 
 pub fn start() void {
     change_time = cart.microsSinceBoot() + micros_per_note;
+    cart.setGlobalVolume(volume);
+    last_controls = cart.controls.*;
 }
 
 var was_down = false;
@@ -107,6 +116,14 @@ var was_up = false;
 const piano_min_note = 21;
 const piano_max_note = 108;
 const piano_max_fundamental = piano_max_note - 12;
+
+var last_controls: cart.Controls = undefined;
+
+const Slider = enum {
+    volume,
+    carrier,
+};
+var selected_slider: Slider = .volume;
 
 pub fn update() void {
     const abs_time = cart.microsSinceBoot();
@@ -129,13 +146,33 @@ pub fn update() void {
 
     var note_changed = false;
 
-    const controls = cart.controls;
+    const controls = cart.controls.*;
+
+    var slider_adjust = delta_sec;
+    if (controls.a) {
+        slider_adjust /= 10.0;
+    }
+    if (controls.b) {
+        slider_adjust /= 100.0;
+    }
+
+    if (controls.select and !last_controls.select) {
+        selected_slider = switch (selected_slider) {
+            .carrier => .volume,
+            .volume => .carrier,
+        };
+    }
+
+    const slider_val = switch (selected_slider) {
+        .volume => &volume,
+        .carrier => &lin_freq,
+    };
 
     if (controls.left) {
-        volume = @max(0.0, volume - delta_sec);
+        slider_val.* = @max(0.0, slider_val.* - slider_adjust);
     }
     if (controls.right) {
-        volume = @min(1.0, volume + delta_sec);
+        slider_val.* = @min(1.0, slider_val.* + slider_adjust);
     }
 
     var selected_param: enum {
@@ -150,7 +187,7 @@ pub fn update() void {
         selected_param = .note;
     }
 
-    if (controls.down and !was_down) {
+    if (controls.down and !last_controls.down) {
         switch (selected_param) {
             .octave => if (fundamental >= piano_min_note + 12) {
                 fundamental -= 12;
@@ -168,9 +205,8 @@ pub fn update() void {
                 note_changed = true;
             },
         }
-        
     }
-    if (controls.up and !was_up) {
+    if (controls.up and !last_controls.up) {
         switch (selected_param) {
             .octave => if (fundamental <= piano_max_fundamental - 12) {
                 fundamental += 12;
@@ -189,12 +225,18 @@ pub fn update() void {
             },
         }
     }
-    was_down = controls.down;
-    was_up = controls.up;
+
+    const log_actual = log_min + lin_freq * (log_max - log_min);
+    const carrier_freq = @exp(log_actual);
 
     if (controls.left or controls.right) {
-        cart.setGlobalVolume(volume);
+        switch (selected_slider) {
+            .volume => cart.setGlobalVolume(volume),
+            .carrier => cart.setAudioCarrierFreq(carrier_freq),
+        }
     }
+
+    last_controls = controls;
 
     if (abs_time >= change_time or note_changed) {
         while (abs_time >= change_time) {
@@ -278,25 +320,37 @@ pub fn update() void {
     cart.rect(.{
         .x = HW - vol_width / 2,
         .y = HH - 8,
-        .width = @intFromFloat(volume * @as(comptime_float, vol_width) + 0.5),
+        .width = @intFromFloat(slider_val.* * @as(comptime_float, vol_width) + 0.5),
         .height = 16,
         .fill_color = lt_blue,
     });
 
-    // Draw the note name and frequency
-    if (scale_pos < major.len) {
-        const midi_note = fundamental + major[scale_pos];
-        const freq = freqFromMidi(@floatFromInt(midi_note));
-        const name = note_names[midi_note % 12];
-        const note_text = std.fmt.bufPrint(&buf, "{s}{d} {d:5.1}Hz", .{ name, midi_note / 12 - 1, freq })
-            catch "Err";
-        // Draw the text
-        cart.text(.{
-            .str = note_text,
-            .x = @intCast(HW-4*note_text.len),
-            .y = HH-4,
-            .text_color = black,
-        });
+    switch (selected_slider) {
+        .volume => {
+            // Draw the note name and frequency
+            if (scale_pos < major.len) {
+                const midi_note = fundamental + major[scale_pos];
+                const freq = freqFromMidi(@floatFromInt(midi_note));
+                const name = note_names[midi_note % 12];
+                const note_text = std.fmt.bufPrint(&buf, "{s}{d} {d:5.1}Hz", .{ name, midi_note / 12 - 1, freq }) catch "Err";
+                // Draw the text
+                cart.text(.{
+                    .str = note_text,
+                    .x = @intCast(HW - 4 * note_text.len),
+                    .y = HH - 4,
+                    .text_color = black,
+                });
+            }
+        },
+        .carrier => {
+            const freq_text = std.fmt.bufPrint(&buf, "{d:8} kHz", .{carrier_freq / 1000.0}) catch "FFFF";
+            cart.text(.{
+                .str = freq_text,
+                .x = @intCast(HW - 4 * freq_text.len),
+                .y = HH - 4,
+                .text_color = black,
+            });
+        },
     }
 
     // Clear behind the wave shape

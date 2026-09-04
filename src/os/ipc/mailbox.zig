@@ -142,6 +142,8 @@ pub const MessageType = struct {
     pub const SYNC_TIME_ACK_CLR: u32 = 0x2a000002;
     pub const SYNC_TIME_REQ_TIME: u32 = 0x2a000003;
 
+    pub const CART_AUDIO_CARRIER: u32 = 0x2b;
+
     // Application messages (user-defined range: 0x30000000 - 0xFFFFFFFF)
     pub const APP_BASE: Message = 0x30000000;
 

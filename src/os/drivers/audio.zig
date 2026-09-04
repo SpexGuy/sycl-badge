@@ -43,15 +43,17 @@ const rev0 = struct {
     /// Integer pre-divider applied to the system clock before the PWM counter.
     const buzzer_pwm_clk_div = 1;
     /// Number of possible values in an audio buffer
-    const audio_levels = 500;
+    const initial_audio_levels = 500;
+    var audio_levels: u16 = initial_audio_levels;
     /// Speed of the pwm cycle for controlling volume,
     /// too fast for humans to hear (or for the speaker to even create)
-    const audio_pwm_cycle_hz = 300_000;
+    const initial_carrier_freq = 300_000;
+    var carrier_freq: f32 = initial_carrier_freq;
 
     // Make sure the above values are consistent with the hardware.
     // They are all important so we specify them all instead of calculating any of them
     comptime {
-        std.debug.assert(buzzer_sys_clk_hz == audio_levels * audio_pwm_cycle_hz * buzzer_pwm_clk_div);
+        std.debug.assert(buzzer_sys_clk_hz == initial_audio_levels * initial_carrier_freq * buzzer_pwm_clk_div);
     }
 
     /// PWM slice number for GPIO9 (slice = pin / 2 = 9 / 2 = 4).
@@ -60,6 +62,8 @@ const rev0 = struct {
 
     /// Separate PWM slice used for wave timing control
     const audio_timing_slice: pwm.Slice = @fromBackingInt(@intCast(5));
+
+    const ClkDivider = pwm.FractionalDivider;
 
     // Needs to be aligned for DMA source
     var square_cc_vals: [2]u32 align(8) = undefined;
@@ -82,7 +86,7 @@ const rev0 = struct {
             .int = @intCast(buzzer_pwm_clk_div),
             .frac = 0,
         });
-        buzzer_pwm_slice.set_wrap(@intCast(audio_levels));
+        buzzer_pwm_slice.set_wrap(@intCast(initial_audio_levels));
 
         buzzer_pwm_ch.set_level(0);
     }
@@ -109,13 +113,59 @@ const rev0 = struct {
 
         // Square wave
         // Use round and floor to allow amplitudes with an odd number of divisions
-        const min_f: f32 = @max(0.0, @min(@round(midpoint - amplitude), audio_levels));
-        const max_f: f32 = @max(0.0, @min(@floor(midpoint + amplitude), audio_levels));
+        const min_f: f32 = @max(0.0, @min(@round(midpoint - amplitude), @as(f32, @floatFromInt(audio_levels))));
+        const max_f: f32 = @max(0.0, @min(@floor(midpoint + amplitude), @as(f32, @floatFromInt(audio_levels))));
         square_cc_vals[0] = @as(u32, @intFromFloat(min_f)) << 16;
         square_cc_vals[1] = @as(u32, @intFromFloat(max_f)) << 16;
     }
 
     fn set_timing_PWM_hz(hz: f32) !void {
+        const config = try calc_clock_divider(hz);
+
+        audio_timing_slice.set_phase_correct(config.phase_correct);
+        audio_timing_slice.set_clk_div(config.clk_div);
+        audio_timing_slice.set_wrap(config.wrap);
+    }
+
+    fn dma_params() DMA_Params {
+        return .{
+            .treq = @fromBackingInt(@intCast(@backingInt(TransferRequest.pwm_wrap0) + @backingInt(audio_timing_slice))),
+            .data_size = .size_32,
+            .ring_size = @fromBackingInt(@intCast(log2_dma_buf_size + 2)),
+            .write_addr = @intFromPtr(&PWM.CH4_CC),
+        };
+    }
+
+    fn encode_sample(val: f32) Sample {
+        const val01 = @max(0.0, @min(1.0, val * 0.5 + 0.5));
+        return @as(u32, @intFromFloat(val01 * rev0.audio_levels)) << 16;
+    }
+
+    fn set_carrier_freq(freq: f32) void {
+        if (freq != carrier_freq) {
+            const cfg = calc_clock_divider(freq) catch return;
+
+            buzzer_pwm_slice.set_clk_div(cfg.clk_div);
+            buzzer_pwm_slice.set_phase_correct(cfg.phase_correct);
+            buzzer_pwm_slice.set_wrap(cfg.wrap);
+            audio_levels = cfg.wrap;
+            carrier_freq = freq;
+
+            if (sound_type.state == .square) {
+                update_square_wave_levels();
+            }
+
+            if (sound_type.state == .silent_tone) {
+                buzzer_pwm_ch.set_level(cfg.wrap / 2);
+            }
+        }
+    }
+
+    fn calc_clock_divider(hz: f32) !struct {
+        phase_correct: bool,
+        clk_div: ClkDivider,
+        wrap: u16,
+    } {
         // A piano ranges from 27.5 Hz to 4186 Hz, so for the square wave generator
         // clock we need to support a pretty wide range with reasonable accuracy.
         // The possible source clocks are 8.4 fractional divs of the sys clock,
@@ -146,26 +196,11 @@ const rev0 = struct {
         const clk_div_int: u32 = if (clk_div == 256) 0 else @intFromFloat(clk_div);
         const wrap_int: u32 = @intFromFloat(wrap_ticks - 1.0);
 
-        audio_timing_slice.set_phase_correct(use_centered_mode);
-        audio_timing_slice.set_clk_div(.{
-            .int = @intCast(clk_div_int >> 4),
-            .frac = @intCast(clk_div_int & 0xF),
-        });
-        audio_timing_slice.set_wrap(@intCast(wrap_int));
-    }
-
-    fn dma_params() DMA_Params {
         return .{
-            .treq = @fromBackingInt(@intCast(@backingInt(TransferRequest.pwm_wrap0) + @backingInt(audio_timing_slice))),
-            .data_size = .size_32,
-            .ring_size = @fromBackingInt(@intCast(log2_dma_buf_size + 2)),
-            .write_addr = @intFromPtr(&PWM.CH4_CC),
+            .phase_correct = use_centered_mode,
+            .clk_div = @bitCast(@as(u12, @intCast(clk_div_int))),
+            .wrap = @intCast(wrap_int),
         };
-    }
-
-    fn encode_sample(val: f32) Sample {
-        const val01 = @max(0.0, @min(1.0, val * 0.5 + 0.5));
-        return @as(u32, @intFromFloat(val01 * rev0.audio_levels)) << 16;
     }
 };
 
@@ -375,6 +410,13 @@ pub fn set_global_volume(in_vol: f32) void {
             set_enabled(global_volume != 0.0);
         }
     }
+}
+
+pub fn set_carrier_freq(freq: f32) void {
+    if (@backingInt(rev.revision) < 1) {
+        rev0.set_carrier_freq(freq);
+    }
+    // Carrier frequency is only used by rev0
 }
 
 pub fn poll() void {

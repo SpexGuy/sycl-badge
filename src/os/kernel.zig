@@ -371,6 +371,9 @@ fn handle_cart_message(msg: u32, sync_time: *bool) void {
     } else if (mailbox.MessageType.getType(msg) == mailbox.MessageType.CART_VOLUME) {
         const volume = mailbox.shared_data.global_volume;
         audio.set_global_volume(volume);
+    } else if (mailbox.MessageType.getType(msg) == mailbox.MessageType.CART_AUDIO_CARRIER) {
+        const freq = mailbox.shared_data.audio_freq;
+        audio.set_carrier_freq(freq);
     } else if (msg == mailbox.MessageType.FRAMEBUFFER_READY or
         mailbox.MessageType.getType(msg) == mailbox.MessageType.FRAMEBUFFER_READY_V2)
     {

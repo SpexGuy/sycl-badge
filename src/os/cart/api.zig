@@ -928,6 +928,26 @@ pub fn setGlobalVolume(volume: f32) void {
     }
 }
 
+/// Adjust the volume of all audio, 0.0 - 1.0. This is a perceptually
+/// linear scale from about -50dB to 0dB adjustment from the maximum
+/// speaker volume.
+pub inline fn setAudioCarrierFreq(freq: f32) void {
+    if (is_wasm) {
+        // TODO wasm volume
+    } else {
+        const CART_AUDIO_CARRIER: u32 = 0x2A000000;
+        const SIO_FIFO_ST: *volatile u32 = @ptrFromInt(0xD0000050);
+        const SIO_FIFO_WR: *volatile u32 = @ptrFromInt(0xD0000054);
+        const FIFO_RDY: u32 = 1 << 1;
+
+        ipc_data.audio_freq = freq;
+
+        while (SIO_FIFO_ST.* & FIFO_RDY == 0) asm volatile ("nop");
+        SIO_FIFO_WR.* = CART_AUDIO_CARRIER;
+        asm volatile ("sev");
+    }
+}
+
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │                                                                           │
 // │ Storage Functions                                                         │
