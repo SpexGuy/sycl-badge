@@ -58,7 +58,7 @@ var last_cycles: u32 = 0;
 /// Cycle count for profiling. This must be called at least once
 /// every 30 seconds to maintain accuracy. The OS will call it
 /// before every update() to maintain this, but if update()
-/// ever takes more than 30 seconds there may be mistakes. 
+/// ever takes more than 30 seconds there may be mistakes.
 pub fn cycles() linksection(".ramfunc") i64 {
     if (is_wasm) {
         return @bitCast(microsSinceBoot());
@@ -210,31 +210,31 @@ const base = if (is_wasm) 4 else 0x20020004;
 pub const CartIPCData = extern struct {
     // Starting offset is 4
     controls: Controls, // 4..6
-    light_level: u16,   // 6..8
+    light_level: u16, // 6..8
     neopixels: [5]NeopixelColor, // 8..x17 bytes
     _pad1: [5]u8, // x17..x1C
     red_led: bool, // x1C..x1D
     _pad2: u8, // x1D..x1E
     battery_level: u16, // x1E..x20
     framebuffers: [2][screen_width][screen_height]Pixel, // x20..xA020, xA020..x14020
-    trace_buf: [0x80]u8,// x14020..x140A0
+    trace_buf: [0x80]u8, // x14020..x140A0
     tone_freq: f32, // x140A0..x140A4
     tone_duration: f32, // x140A4..x140A8
-    dirty_rect_x: u16,  // x140A8..x140AA
-    dirty_rect_y: u16,  // x140AA..x140AC
-    dirty_rect_w: u16,  // x140AC..x140AE
-    dirty_rect_h: u16,  // x140AE..x140B0
-    tone_volume: f32,   // x140B0..x140B4
-    tone_flags: u32,    // x140B4..x140B8
+    dirty_rect_x: u16, // x140A8..x140AA
+    dirty_rect_y: u16, // x140AA..x140AC
+    dirty_rect_w: u16, // x140AC..x140AE
+    dirty_rect_h: u16, // x140AE..x140B0
+    tone_volume: f32, // x140B0..x140B4
+    tone_flags: u32, // x140B4..x140B8
     global_volume: f32, // x140B8..x140BC
     audio_freq: f32, // x140BC..x140C0
     tracy_ring: [tracy_buffer_size]u8, // x140C0..x150C0
-    tracy_read_pos: u32,   // x150C0..x150C4
-    _pad4: [3]u32,         // x150C4..x150D0, tracy_read_pos needs its own granule
+    tracy_read_pos: u32, // x150C0..x150C4
+    _pad4: [3]u32, // x150C4..x150D0, tracy_read_pos needs its own granule
     tracy_write_ctrl: u32, // x150D0..x150D4
-    _pad5: [3]u32,         // x150D4..x150E0, tracy_write_ctrl needs its own granule
-    tracy_spinlock: u32,   // x150E0..x150E4
-    _pad6: [3]u32,         // x150E4..x150F0, tracy_spinlock gets its own granule
+    _pad5: [3]u32, // x150D4..x150E0, tracy_write_ctrl needs its own granule
+    tracy_spinlock: u32, // x150E0..x150E4
+    _pad6: [3]u32, // x150E4..x150F0, tracy_spinlock gets its own granule
 
     comptime {
         // cart_xip.ld reserves 0x15100 bytes for IPC data.
@@ -1014,7 +1014,7 @@ const external_linksection = ".rodata";
 
 fn StringWrap(comptime str: [:0]const u8) type {
     return struct {
-        const bytes linksection(external_linksection) = str[0..str.len:0].*;
+        const bytes linksection(external_linksection) = str[0..str.len :0].*;
     };
 }
 
@@ -1038,7 +1038,7 @@ inline fn external_source_location(comptime name: ?[:0]const u8, comptime zig_sr
     return &SourceLocationWrap(name, zig_src_loc, color).src_loc;
 }
 
-pub const TracyAtomicWriteCtrl = packed struct (u32) {
+pub const TracyAtomicWriteCtrl = packed struct(u32) {
     write_pos: u16,
     _pad: u12 = 0,
     server_connected: bool,
@@ -1060,7 +1060,7 @@ pub const TracyAtomicWriteCtrl = packed struct (u32) {
 };
 
 inline fn ring_available(read_pos: u16, write_pos: u16, size: u16) u16 {
-    return (read_pos -% 1 -% write_pos) & (size-1);
+    return (read_pos -% 1 -% write_pos) & (size - 1);
 }
 
 const RingBufferWriter = struct {
@@ -1080,7 +1080,7 @@ const RingBufferWriter = struct {
             const second_len = bytes.len - first_len;
             @memcpy(w.buf[0..second_len], bytes[first_len..]);
         }
-        w.write_pos = @intCast((w.write_pos +% bytes.len) & (w.size-1));
+        w.write_pos = @intCast((w.write_pos +% bytes.len) & (w.size - 1));
     }
 };
 
@@ -1104,14 +1104,13 @@ inline fn spin_lock_acquire_sw(lock: *u32) void {
         \\    cmp %[t1], #0                  // check if lock is taken
         \\    bne 1b                         // retry if lock is taken
         \\    strex %[t1], %[t0], [%[lock]]  // attempt to claim the lock
-         \\   cmp %[t1], #0                 //  check if we got it
-          \\  bne 1b                       //   retry if not
-           //\\ dmb                         //    finally, memory barrier
-        : [t0] "=&r" (tmp0)
-        , [t1] "=&r" (tmp1)
-        : [lock] "r" (lock)
-        : .{ .memory = true }
-    );
+        \\   cmp %[t1], #0                 //  check if we got it
+        \\  bne 1b                       //   retry if not
+        //\\ dmb                         //    finally, memory barrier
+        : [t0] "=&r" (tmp0),
+          [t1] "=&r" (tmp1),
+        : [lock] "r" (lock),
+        : .{ .memory = true });
 }
 
 inline fn spin_lock_release_sw(lock: *u32) void {
@@ -1119,8 +1118,8 @@ inline fn spin_lock_release_sw(lock: *u32) void {
     asm volatile (
         \\ stl %[zero], [%[lock]] // store with release semantics
         :
-        : [zero] "r" (zero)
-        , [lock] "r" (lock)
+        : [zero] "r" (zero),
+          [lock] "r" (lock),
     );
 }
 
