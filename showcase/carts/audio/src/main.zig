@@ -79,6 +79,7 @@ const major_scale_uses_sharps: [12]bool = .{
 };
 
 const wave_shapes = [_]cart.Tone2Options.Shape{
+    .silent_tone,
     .square,
     .triangle,
     .sawtooth,
@@ -299,10 +300,11 @@ pub fn update() void {
     }
 
     // Clear behind the wave shape
+    const max_shape_width = (@tagName(.silent_tone).len + 1) * 8;
     cart.rect(.{
-        .x = HW - max_scale_width/2,
+        .x = HW - max_shape_width / 2,
         .y = volume_bot + 2,
-        .width = max_scale_width,
+        .width = max_shape_width,
         .height = 8,
         .fill_color = gray,
     });

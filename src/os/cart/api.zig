@@ -227,7 +227,7 @@ pub const CartIPCData = extern struct {
     tone_volume: f32,   // x140B0..x140B4
     tone_flags: u32,    // x140B4..x140B8
     global_volume: f32, // x140B8..x140BC
-    _pad3: u32,         // x140BC..x140C0
+    audio_freq: f32, // x140BC..x140C0
     tracy_ring: [tracy_buffer_size]u8, // x140C0..x150C0
     tracy_read_pos: u32,   // x150C0..x150C4
     _pad4: [3]u32,         // x150C4..x150D0, tracy_read_pos needs its own granule
@@ -851,6 +851,7 @@ pub const Tone2Options = struct {
         sine, // u^u^u^
         major, // Major chord with frequency as the fundamental
         minor, // Minor chord with frequency as the fundamental
+        silent_tone = 7,
     };
 
     pub const Flags = packed struct(u32) {

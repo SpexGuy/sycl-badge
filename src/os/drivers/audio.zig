@@ -244,6 +244,7 @@ var sound_type: terry.core0.TrackedStateMachine(enum {
     triangle,
     sawtooth,
     sample,
+    silent_tone,
 }) = undefined;
 
 const MixState = enum {
@@ -325,13 +326,14 @@ noinline fn mix_buffer_samples(comptime impl: type, buffer: []impl.Sample, sampl
         .square => mix_audio_square(impl, buffer[0..samples_to_mix]),
         .sawtooth => mix_audio_sawtooth(impl, buffer[0..samples_to_mix]),
         .triangle => mix_audio_triangle(impl, buffer[0..samples_to_mix]),
+        .silent_tone => @memset(buffer[0..samples_to_mix], impl.encode_sample(0.0)),
         .sample => {
             // TODO sample mixing
         },
     }
 
     if (samples_to_mix < buffer.len) {
-        @memset(buffer[samples_to_mix..], comptime impl.encode_sample(0.0));
+        @memset(buffer[samples_to_mix..], impl.encode_sample(0.0));
         return false;
     }
 
@@ -430,8 +432,6 @@ fn update_derived_volume() void {
 /// Passing 0 is equivalent to calling `stop()`.
 /// The speaker enable pin is asserted automatically.
 pub fn tone(freq_hz: f32, duration_sec: f32, volume: f32, flags: u32) void {
-    board.led_pin.put(0);
-
     if (freq_hz == 0 or volume <= 0 or (duration_sec != -1.0 and duration_sec <= 0.0)) {
         stop();
         return;
@@ -443,7 +443,7 @@ pub fn tone(freq_hz: f32, duration_sec: f32, volume: f32, flags: u32) void {
     // pick up the updated parameters the next time it runs.
     const sample_sel = flags & 0x7;
     const needs_dma_reset = switch (sample_sel) {
-        0 => rev.revision == .r0 or mix_state.state != .running,
+        0, 7 => rev.revision == .r0 or mix_state.state != .running,
         else => mix_state.state != .running,
     };
 
@@ -457,6 +457,7 @@ pub fn tone(freq_hz: f32, duration_sec: f32, volume: f32, flags: u32) void {
     }
 
     if (sample_sel == 0 and rev.revision == .r0) {
+        sound_type.set_state(.square, @src());
         rev0.update_square_wave_levels();
         setup_audio_sample_DMA(duration_sec, freq_hz, rev0.square_wave_sample) catch {
             // This frequency is too slow for us to reproduce, and also probably
@@ -464,12 +465,17 @@ pub fn tone(freq_hz: f32, duration_sec: f32, volume: f32, flags: u32) void {
             stop();
             return;
         };
+    } else if (sample_sel == 7 and rev.revision == .r0) {
+        finish_stop_DMA();
+        sound_type.set_state(.silent_tone, @src());
+        rev0.buzzer_pwm_ch.set_level(rev0.audio_levels / 2);
     } else {
         period_per_sample = freq_hz / max_sample_rate;
         switch (sample_sel) {
             0 => sound_type.set_state(.square, @src()),
             1 => sound_type.set_state(.triangle, @src()),
             2 => sound_type.set_state(.sawtooth, @src()),
+            7 => sound_type.set_state(.silent_tone, @src()),
             else => {
                 stop();
                 return;
