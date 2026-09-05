@@ -193,6 +193,17 @@ fn wait_for_ready() void {
     sync_resolve_state(true); // force synchronous SPI flush
 }
 
+pub fn set_vsync_enabled(enabled: bool) void {
+    const te_pin = board.LCD_TE;
+    if (enabled) {
+        te_pin.set_irq_enabled(.{ .rise = 1 }, true);
+        writeCommandWithData(.TEARON, &.{ 0x00 }); // enable vsync but not hsync
+    } else {
+        te_pin.set_irq_enabled(.{}, false);
+        writeCommand(.TEAROFF); // disable vsync line
+    }
+}
+
 fn ensure_ready() void {
     if (state.* != .ready) {
         // TODO: this is a programmer error, it will likely
@@ -275,6 +286,8 @@ const Command = enum(u8) {
     CASET = 0x2A, // Column Address Set
     RASET = 0x2B, // Row Address Set
     RAMWR = 0x2C, // Memory Write
+    TEAROFF = 0x34, // Disable tearing effect (vsync) signal
+    TEARON = 0x35, // Enable tearing effect (vsync) signal
     MADCTL = 0x36, // Memory Access Control
     COLMOD = 0x3A, // Color Mode
     FRMCTR1 = 0xB1,
@@ -357,11 +370,11 @@ pub const Config = struct {
 
 /// Low-level initialization (control pins only)
 /// Use initWithAllPins() for full initialization including SPI and TE pins
-pub fn init(pin_config: Pins, config: Config) !void {
+pub fn init(lcd_pins: LCDPins, config: Config) !void {
     const z = terry.core0.zone("lcd.init", @src());
     defer z.end();
 
-    pins = pin_config;
+    pins = lcd_pins.control;
 
     // Configure GPIO pins
     pins.cs.set_function(.sio);
@@ -903,7 +916,7 @@ pub fn initWithAllPins(all_pins: LCDPins, config: Config) !void {
     configureLCDTEPin(all_pins.te);
 
     // Initialize LCD with control pins
-    try init(all_pins.control, config);
+    try init(all_pins, config);
 }
 
 // DMA Functions
