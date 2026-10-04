@@ -145,6 +145,11 @@ pub fn build(b: *Build) void {
         .optimize = .ReleaseSmall,
         .root_source_file = b.path("carts/empty-cart/main.zig"),
     });
+    add_cart(b, &dep, .{
+        .name = "champ",
+        .optimize = .ReleaseSmall,
+        .root_source_file = b.path("carts/champ/main.zig"),
+    });
 
     const font_export_step = b.step("generate-font.ts", "convert src/font.zig to simulator/src/font.ts");
     const font_export_exe = b.addExecutable(.{
