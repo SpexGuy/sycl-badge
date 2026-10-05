@@ -100,51 +100,175 @@ const micros_per_note: u64 = 500_000; // 0.5 second per note
 var change_time: u64 = 0;
 var last_abs_time: u64 = 0;
 
-var slider: f32 = 0.0;
+var slider: f32 = 0.5;
+var wait_for_initial_release_a = true;
 
 // Buffer two frames of audio
 var audio_sample_buf: [2 * cart.audio_sample_rate / 60]u8 align(8) = undefined;
-var audio_active: bool = false;
+var trombone_active: bool = false;
 var audio_phase: u32 = 0;
 var delta_phase: u32 = 0;
 
-var audio_time: u32 = 0;
+var samples_left_in_tick: u32 = 0;
 
 fn update_audio() void {
     while (cart.audio_get_buffer(u8)) |buf| {
         mix_audio(buf);
         cart.audio_submit_samples(buf.len);
-        audio_time +%= @intCast(buf.len);
     }
 }
 
 fn mix_audio(buf: []u8) void {
-    if (!audio_active) {
-        @memset(buf, 0x7F);
-        return;
+    var buf_left = buf;
+    while (buf_left.len > 0) {
+        if (samples_left_in_tick == 0) {
+            audio_tick();
+            samples_left_in_tick = 44100/60;
+        }
+
+        const samples_to_mix = @min(buf_left.len, samples_left_in_tick);
+        mix_audio_in_tick(buf_left[0..samples_to_mix]);
+        samples_left_in_tick -= samples_to_mix;
+        buf_left = buf_left[samples_to_mix..];
+    }
+}
+
+fn mix_audio_in_tick(buf: []u8) void {
+    for (buf) |*sample| {
+        bass.phase +%= bass.delta_phase;
+        if (bass.delta_freq != 0) {
+            bass.freq += bass.delta_freq;
+            bass.calc_delta_phase();
+        }
+
+        audio_phase +%= delta_phase;
+
+        var result: u8 = 0;
+
+        if (trombone_active) {
+            result += @intCast((audio_phase >> 25) + (audio_phase >> 26));
+        } else {
+            result += 0x7F;
+        }
+
+        if (bass.freq != 0) {
+            result += @intCast((bass.phase & 0x8000_0000) >> 25);
+        } else {
+            result += 0x20;
+        }
+
+        sample.* = result;
     }
 
-    switch (active_wave_shape) {
-        .square => for (buf) |*sample| {
-            sample.* = if (audio_phase & 0x8000_0000 != 0) 0xFF else 0x00;
-            audio_phase +%= delta_phase;
-        },
-        .sawtooth => for (buf) |*sample| {
-            sample.* = @intCast(audio_phase >> 24);
-            audio_phase +%= delta_phase;
-        },
-        .triangle => for (buf) |*sample| {
-            // Similar to abs, but negative values are also shifted by 1, giving a more even
-            // triangle that avoids 0x8000_0000 as a possible value
-            const tri_val = if (audio_phase & 0x8000_0000 != 0) ~audio_phase else audio_phase;
-            sample.* = @intCast(tri_val >> 23);
-            audio_phase +%= delta_phase;
-        },
-        .sine => for (buf) |*sample| {
-            sample.* = @intCast(fast_sin(audio_phase) >> 24);
-            audio_phase +%= delta_phase;
-        },
+}
+
+const MultiTone = struct {
+    loops: u32,
+    // index of the tone to jump back to when a looping multitone ends
+    loop_tone: usize = 0,
+    outro_tone: usize = 0,
+    tones: []const music.Tone,
+    current_tone: usize = 0,
+    current_tone_frame: u32 = 0,
+
+    phase: u32 = 0,
+    delta_phase: u32 = 0,
+    freq: f32 = 0,
+    delta_freq: f32 = 0,
+
+    fn calc_delta_phase(f: *@This()) void {
+        // phase_per_sample = phase_per_period * periods_per_second / samples_per_second
+        f.delta_phase = @intFromFloat(@as(f64, 0x1_0000_0000) * @as(f64, f.freq) / @as(f64, cart.audio_sample_rate) + 0.5);
     }
+
+    pub fn tick(mt: *MultiTone) void {
+        if (mt.current_tone >= mt.tones.len) return;
+
+        mt.current_tone_frame += 1;
+        if (mt.current_tone_frame > mt.tones[mt.current_tone].duration) {
+            mt.current_tone += 1;
+            mt.current_tone_frame = 1;
+            if (mt.current_tone >= mt.tones.len) {
+                if (mt.loops > 0) {
+                    mt.loops -= 1;
+                    mt.current_tone = mt.loop_tone;
+                } else if (mt.outro_tone != 0) {
+                    mt.current_tone = mt.outro_tone;
+                    mt.outro_tone = 0;
+                } else {
+                    mt.freq = 0;
+                    mt.delta_freq = 0;
+                    mt.phase = 0;
+                    mt.delta_phase = 0;
+                    return;
+                }
+            }
+        }
+
+        if (mt.current_tone_frame == 1) {
+            const t = &mt.tones[mt.current_tone];
+            if (t.frequency != 0) {
+                const samples_per_tick = 44100/60;
+
+                const has_sweep = (t.frequency & 0xFFFF_0000) != 0;
+
+                const start_freq_hz: f32 = @floatFromInt(t.frequency & 0xFFFF);
+
+                const end_freq_hz: f32 = if (!has_sweep)
+                    start_freq_hz
+                else
+                    @floatFromInt(t.frequency >> 16);
+
+                const freq_delta: f32 = if (has_sweep) blk: {
+                    const duration_samples = t.duration * samples_per_tick;
+                    break :blk (end_freq_hz - start_freq_hz) / @as(f32, @floatFromInt(duration_samples));
+                } else 0;
+
+                mt.freq = start_freq_hz;
+                mt.delta_freq = freq_delta;
+                mt.calc_delta_phase();
+            } else {
+                mt.freq = 0;
+                mt.delta_freq = 0;
+                mt.phase = 0;
+                mt.delta_phase = 0;
+            }
+        }
+    }
+};
+
+fn toneIndexAt(comptime tones: []const music.Tone, comptime ticks: u32) usize {
+    var t: u32 = 0;
+    for (tones, 0..) |tone, i| {
+        if (t == ticks) return i;
+        if (t > ticks) break;
+        t += tone.duration;
+    }
+    @compileError(std.fmt.comptimePrint("tick {} is not the start of a tone", .{ticks}));
+}
+
+// loop back to where the melody comes in, skipping the intro
+const start_menu_music_loop_tick = 480;
+const outro_tick = 1200;
+
+var bass: MultiTone = .{
+    .loops = 1,
+    .loop_tone = toneIndexAt(&music.bass, start_menu_music_loop_tick),
+    .outro_tone = toneIndexAt(&music.bass, outro_tick),
+    .tones = &music.bass,
+};
+
+var melody: MultiTone = .{
+    .loops = 1,
+    .loop_tone = toneIndexAt(&music.melody, start_menu_music_loop_tick),
+    .outro_tone = toneIndexAt(&music.melody, outro_tick),
+    .tones = &music.melody,
+};
+
+fn audio_tick() void {
+    bass.tick();
+    melody.freq += melody.delta_freq * (44100/60);
+    melody.tick();
 }
 
 // Approximated fixed-point sinewave, modified
@@ -222,8 +346,12 @@ pub fn update() void {
         selected_param = .shape;
     }
 
-    if (audio_active != controls.a) {
-        audio_active = controls.a;
+    if (!controls.a and wait_for_initial_release_a) {
+        wait_for_initial_release_a = false;
+    }
+
+    if (trombone_active != controls.a and !wait_for_initial_release_a) {
+        trombone_active = controls.a;
         brake_pct = if (controls.a) 1.0 else 0.0;
     }
 
@@ -270,33 +398,19 @@ fn draw_slider(midi_note: f32) void {
         .y = slider_y - 4,
         .width = 8,
         .height = 8,
-        .fill_color = if (audio_active) lt_blue else orange,
+        .fill_color = if (trombone_active) lt_blue else orange,
         .stroke_color = white,
     });
 }
 
 fn draw_music_track() void {
-    const tune = &music.melody;
-    var audio_frame = audio_time / (44100/60);
-    var tune_i: u32 = 0;
-    while (tune_i < tune.len and tune[tune_i].duration <= audio_frame) {
-        audio_frame -= tune[tune_i].duration;
-        tune_i += 1;
-    }
-    if (tune_i >= tune.len) return;
+    var mel = melody;
 
     for (10..cart.screen_width) |x| {
-        const note = tune[tune_i];
+        mel.tick();
 
-        if (note.frequency != 0) {
-            const start_freq: f32 = @floatFromInt(note.frequency & 0xFFFF);
-            var end_freq: f32 = @floatFromInt(note.frequency >> 16);
-            if (end_freq == 0) end_freq = start_freq;
-
-            const note_pct = @as(f32, @floatFromInt(audio_frame)) / @as(f32, @floatFromInt(note.duration));
-            const freq = std.math.lerp(start_freq, end_freq, note_pct);
-
-            const midi = midiFromFreq(freq);
+        if (mel.freq != 0) {
+            const midi = midiFromFreq(mel.freq);
             const y = screen_y_for_midi(midi);
             if (y >= 2 and y < cart.screen_height - 2) {
                 cart.framebuffer[x][@intCast(y-2)] = white;
@@ -305,13 +419,7 @@ fn draw_music_track() void {
                 cart.framebuffer[x][@intCast(y+1)] = lt_blue;
                 cart.framebuffer[x][@intCast(y+2)] = white;
             }
-        }
-
-        audio_frame += 1;
-        while (audio_frame >= tune[tune_i].duration) {
-            audio_frame -= tune[tune_i].duration;
-            tune_i += 1;
-            if (tune_i >= tune.len) return;
+            mel.freq += mel.delta_freq * (44100/60);
         }
     }
 }
